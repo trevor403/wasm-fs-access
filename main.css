@@ -1,0 +1,34 @@
+body {
+    font-family: helvetica, sans-serif, arial;
+    font-size: 1em;
+    color: #111;
+}
+
+#xterm {
+    width: 700px;
+    height: 400px;
+}
+
+#terminal-container {
+    width: 700px;
+    height: 400px;
+    margin: 0 auto;
+    padding: 2px;
+}
+
+#terminal-container .terminal {
+    background-color: #111;
+    color: #fafafa;
+    padding: 2px;
+}
+
+#terminal-container .terminal .terminal-cursor {
+    background-color: #fafafa;
+}
+
+/*
+.xterm-rows div {
+    height: 16px;
+}
+
+*/
