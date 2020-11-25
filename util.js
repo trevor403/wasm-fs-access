@@ -111,7 +111,7 @@ function getDirectoryEntry(expectedName) {
     let transaction = db.transaction(["filerefs"], "readwrite");
     request = transaction.objectStore("filerefs").get(file_id);
     request.onsuccess = function(e) {
-        orig.log(e);
+        console.orig.log(e);
         // let ref = e.result;
     }
 }

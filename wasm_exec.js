@@ -1,3 +1,5 @@
+import { OpenFiles, FIRST_PREOPEN_FD } from './wasi-fs-access/fileSystem.js';
+
 // Copyright 2018 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -53,22 +55,7 @@
 		return err;
 	};
 
-	const simplifyPath = (path) => {
-		var arr = path.split('/');
-		var stack = [];
-		var len = arr.length;
-		var item = '';
-		for (var i = 0; i < len; i++) {
-			item = arr[i];
-			if (item === '' || item === '.') continue;
-			if (item === '..') {
-				stack.pop();
-			} else {
-				stack.push(item);
-			}
-		}
-		return '/' + stack.join('/');
-	};
+	const argsToString = (...a) => JSON.stringify(a).slice(1, -1);
 
 	const inspectPath = (path) => {
 		var arr = path.split('/');
@@ -87,34 +74,16 @@
 		return stack;
 	};
 
-	// transverse from root function
-
-	global.eventBus = new EventEmitter();
-
-	// TODO: https://blog.merzlabs.com/posts/native-file-system/
-	// TODO: https://github.com/jvilk/BrowserFS/blob/master/src/core/FS.ts#L300
-	// TODO: https://github.com/wcchoi/go-wasm-pdfcpu/blob/master/wasm_exec.js#L145
-
-	// TODO: https://github.com/KriNeko/KriNeko.github.io/blob/master/fs-test/script.js
-	// TODO: https://wicg.github.io/file-system-access/
-
-	// TODO: https://developers.google.com/web/updates/2011/08/Seek-into-local-files-with-the-File-System-API
-	// TODO: https://web.dev/file-system-access/
-
-	// TODO: https://www-numi.fnal.gov/offline_software/srt_public_context/WebDocs/Errors/unix_system_errors.html
-
-	// https://trevor.la/home/
-
 	if (!global.fs) {
 		let outputBuf = "";
+
 		global.fs = {
 			writeSync(fd, buf) {
 				if (fd === 1 || fd === 2) {
 					outputBuf += decoder.decode(buf);
 					const nl = outputBuf.lastIndexOf("\n");
 					if (nl != -1) {
-						// console.log(outputBuf.substr(0, nl));
-						eventBus.emit('printEvent', outputBuf.substr(0, nl)); // + "\r\n"
+						term.writeln(outputBuf.substr(0, nl));
 						outputBuf = outputBuf.substr(nl + 1);
 					}
 					return buf.length;
@@ -131,201 +100,202 @@
 					const n = this.writeSync(fd, buf);
 					return callback(null, n, buf);
 				} else {
-					console.log(`called write(${JSON.stringify([fd, "buf", offset, length, position]).slice(1, -1)})`);
-					const os = global.fs.constants;
-
-					let handle = this.dirent[fd];
-					let stream = await handle.sysfile.createWritable({
-						keepExistingData: Boolean(handle.flags & os.O_APPEND),
-					});
-					await stream.write({ type: "write", position: handle.pos + offset, data: buf });
-					await stream.close();
+					console.log(`called write(${ argsToString(fd, "buf", offset, length, position) })`);
+		
+					let handle = global.fs.openFiles.get(fd).asFile();
+					await handle.write(buf);
+		
 					return callback(null, length);
 				}
-
+			},
+			chmod(path, mode, callback) {
+				console.log(`called chmod(${ argsToString(path, mode) })`);
 				callback(enosys());
 			},
-			chmod(path, mode, callback) { console.log("called chmod()"); callback(enosys()); },
-			chown(path, uid, gid, callback) { console.log("called chown()"); callback(enosys()); },
+			chown(path, uid, gid, callback) {
+				console.log(`called chown(${ argsToString(path, uid, gid) })`);
+				callback(enosys());
+			},
 			close(fd, callback) {
-				console.log("STUB called close()");
-				// TODO: add an actual close cleanup
-				callback(null);
-			},
-			fchmod(fd, mode, callback) { console.log("called fchmod()"); callback(enosys()); },
-			fchown(fd, uid, gid, callback) { console.log("called fchown()"); callback(enosys()); },
-			async fstat(fd, callback) {
-				console.log(`called fstat(${fd})`);
-				let handle = this.dirent[fd];
-				if (handle instanceof FileHandle) {
-					var stat;
-					if (handle.isDir) {
-						stat = new DirStats();
-					} else {
-						let jsfile = await handle.sysfile.getFile();
-						stat = new FileStats(jsfile);
-					}
-					return callback(null, stat);
-				}
-
-				return callback(enosys());
-			},
-			fsync(fd, callback) { console.log("STUB called fsync()"); callback(null); },
-			ftruncate(fd, length, callback) { console.log("called ftruncate()"); callback(enosys()); },
-			lchown(path, uid, gid, callback) { console.log("called lchown()"); callback(enosys()); },
-			link(path, link, callback) { console.log("called link()"); callback(enosys()); },
-			async lstat(path, callback) {
-				console.log(`called lstat(${JSON.stringify(path)})`);
-				const cb = (err, val) => { return [err, val]; };
-				let [err, fd] = await this.open(path, 0, 0, cb);
-				if (err !== null) {
-					return callback(err);
-				}
-				let ret = await this.fstat(fd, callback);
-				// TODO: close fd here
-				return;
-			},
-			mkdir(path, perm, callback) { console.log(`called mkdir(${path})`); callback(enosys()); },
-			async open(path, flags, mode, callback) {
-				console.log(`called open(${JSON.stringify([path, flags, mode]).slice(1, -1)})`);
-				const os = global.fs.constants;
-
-				let parts = inspectPath(path);
-				var parent = global.rootHandle;
-				var isDir = false;
-
-				if (path == "/" || parts.length == 0) {
-					console.log(`rare to get zero parts on ${path}`);
-					return callback(null, 3);
-				}
-
-				ident = [];
-
-				while (parts.length > 1) {
-					let part = parts.shift();
-					ident.push(part);
-					parent = await parent.getDirectoryHandle(part).catch(error => error);
-					if (parent instanceof Error) {
-						console.error(`got parent error ${parent}`);
-						return callback(enoent());
-					}
-					global.fs.direntMap[ident] = parent;
-				}
-
-				let name = parts.shift();
-				let options = { create: Boolean(flags & os.O_CREAT) };
-				var handle = await parent.getFileHandle(name, options).catch(error => error);
-				if (handle instanceof Error && handle.name == "TypeMismatchError") {
-					handle = await parent.getDirectoryHandle(name);
-					isDir = true;
-				}
-
-				console.log(handle);
-
-				if (handle instanceof Error && handle.name == "NotFoundError") {
-					return callback(enoent());
-				}
-
-				var pos = 0;
-				if (flags & os.O_WRONLY || flags & os.O_RDWR) {
-					if (flags & os.O_TRUNC) {
-						let writer = await handle.createWritable({ keepExistingData: false });
-						writer.close();
-					}
-
-					if (flags & os.O_APPEND) {
-						let jsfile = await handle.getFile();
-						pos = jsfile.size;
-					}
-				}
-
-				let entry = new FileHandle(handle, pos, flags, isDir);
-				let fd = this.dirent.push(entry) - 1;
-
-				console.log("open success");
-				return callback(null, fd);
-				// callback(enosys());
-			},
-			async read(fd, buffer, offset, length, position, callback) {
-				console.log(`called read(${JSON.stringify([fd, "buf", offset, length, position]).slice(1, -1)})`);
-				let handle = this.dirent[fd];
-
-				if (handle.isDir) {
-					return callback(eisdir());
-				}
-
-				let jsfile = await handle.sysfile.getFile();
-
-				let reader = jsfile.stream().getReader();
-				let { value: view, done } = await reader.read();
-
-				if (handle.end) {
-					this.dirent[fd].end = false;
-					return callback(null, 0);
-				} else {
-					buffer.set(view);
-					this.dirent[fd].end = true;
-					return callback(null, view.byteLength);
-				}
-			},
-			async readdir(path, callback) {
-				console.log(`called readdir(${JSON.stringify(path)})`);
-
-				const cb = (err, val) => { return [err, val]; };
-				let [err, fd] = await this.open(path, 0, 0, cb);
-
-				let handle = this.dirent[fd];
-				if (!(handle instanceof FileHandle) || handle === undefined) {
+				console.log(`called close(${fd})`);
+		
+				if (fd < FIRST_PREOPEN_FD) {
 					return callback(ebadf());
 				}
-
-				// TODO: close fd here
-
+		
+				global.fs.openFiles.get(fd).close(fd);
+				callback(null);
+			},
+			fchmod(fd, mode, callback) {
+				console.log(`called fchmod(${ argsToString(fd, mode) })`);
+				callback(enosys());
+			},
+			fchown(fd, uid, gid, callback) {
+				console.log(`called fchown(${ argsToString(fd, uid, gid) })`);
+				callback(enosys());
+			},
+			async fstat(fd, callback) {
+				console.log(`called fstat(${fd})`);
+				let handle = global.fs.openFiles.get(fd);
+		
+				let stat;
+				if (fd < FIRST_PREOPEN_FD) {
+					callback(enosys());
+				} else if (handle.isFile) {
+					// RegularFile
+					let jsfile = await handle._handle.getFile();
+					stat = new FileStats(jsfile);
+				} else {
+					// Directory
+					stat = new DirStats();
+				}
+				return callback(null, stat);
+			},
+			fsync(fd, callback) { console.log(`STUB called fsync(${fd})`); callback(null); },
+			ftruncate(fd, length, callback) {
+				console.log(`called ftruncate(${ argsToString(fd, length) })`);
+				callback(enosys());
+			},
+			lchown(path, uid, gid, callback) {
+				console.log(`called lchown(${ argsToString(path, uid, gid) })`);
+				callback(enosys());
+			},
+			link(path, link, callback) {
+				console.log(`called link(${ argsToString(path, link) })`);
+				callback(enosys());
+			},
+			async lstat(path, callback) {
+				console.log(`called lstat(${ argsToString(path) })`);
+		
+				try {
+					var fixedPath = inspectPath(path).join("/");
+					let handle = await global.fs.rootHandle.getFileOrDir(fixedPath, 3);
+			
+					let stat;
+					if (handle.kind !== "directory") {
+						// RegularFile
+						let jsfile = await handle.getFile();
+						stat = new FileStats(jsfile);
+					} else {
+						// Directory
+						stat = new DirStats();
+					}
+					return callback(null, stat);
+				} catch (error) {
+					return callback(enoent());
+				}
+			},
+			async mkdir(path, perm, callback) {
+				console.log(`called mkdir(${ argsToString(path, perm) })`);
+		
+				var fixedPath = inspectPath(path).join("/");
+				await global.fs.rootHandle.getFileOrDir(fixedPath, 2, 1 | 2 | 4);
+		
+				callback(null);
+			},
+			async open(path, flags, mode, callback) {
+				console.log(`called open(${ argsToString(...arguments) })`);
+				const os = global.fs.constants;
+		
+				var fixedPath = inspectPath(path).join("/");
+		
+				try {
+					let fd = await global.fs.openFiles.open(global.fs.rootHandle, fixedPath, flags);
+					let handle = global.fs.openFiles.get(fd);
+					if (flags & os.O_TRUNC) {
+						let writer = await handle._handle.createWritable({ keepExistingData: false });
+						writer.close();
+					}
+					if (flags & os.O_APPEND) {
+						let jsfile = await handle.getFile();
+						handle.position = jsfile.size;
+					} 
+					return callback(null, fd);
+				} catch (error) {
+					return callback(enoent());
+				}
+			},
+			async read(fd, buffer, offset, length, position, callback) {
+				console.log(`called read(${ argsToString(fd, "buf", offset, length, position) })`);
+		
+				let handle = global.fs.openFiles.get(fd).asFile();
+				let view = await handle.read(length);
+		
+				if (view.byteLength > 0) {
+					buffer.set(view);
+				}
+		
+				return callback(null, view.byteLength);
+		
+			},
+			async readdir(path, callback) {
+				console.log(`called readdir(${ argsToString(path) })`);
+		
+				// const cb = (err, val) => { return [err, val]; };
+				// let [err, fd] = await this.open(path, 0, 0, cb);
+				// let openDir = global.fs.openFiles.get(fd).asDir();
+				var fixedPath = inspectPath(path).join("/");
+				let handle = await global.fs.rootHandle.getFileOrDir(fixedPath, 3);
+		
 				const files = [];
-				for await (let [name, _handle] of handle.sysfile) {
-					orig.log(name);
+				for await (let [name] of handle) {
 					files.push(name);
 				}
 				callback(null, files);
 			},
-			readlink(path, callback) { console.log("called readlink()"); callback(enosys()); },
-			rename(from, to, callback) { console.log("called rename()"); callback(enosys()); },
-			rmdir(path, callback) { console.log("called rmdir()"); callback(enosys()); },
-			async stat(path, callback) {
-				console.log(`called stat("${path}")`);
-				// return callback(enosys());
-				await this.lstat(path, callback);
+			readlink(path, callback) {
+				console.log(`called readlink(${ argsToString(path) })`);
+				callback(enosys());
 			},
-			symlink(path, link, callback) { console.log("called symlink()"); callback(enosys()); },
-			truncate(path, length, callback) { console.log("called truncate()"); callback(enosys()); },
-			unlink(path, callback) { console.log("called unlink()"); callback(enosys()); },
-			utimes(path, atime, mtime, callback) { console.log("called utimes()"); callback(enosys()); },
-		};
-
-		global.fs.constants = {
-			O_RDONLY: 0,
-			O_WRONLY: 1,
-			O_RDWR: 2,
-			O_CREAT: 64,
-			O_EXCL: 128,
-			O_NOCTTY: 256,
-			O_TRUNC: 512,
-			O_APPEND: 1024,
-			O_DIRECTORY: 65536,
-			O_NOATIME: 262144,
-			O_NOFOLLOW: 131072,
-			O_SYNC: 1052672,
-			O_DIRECT: 16384,
-			O_NONBLOCK: 2048,
-		};
-
-		global.fs.dirent = [
-			"special", // stdin
-			"special", // stdout
-			"special", // stderr
-		];
-
-		global.fs.direntMap = {};
+			rename(from, to, callback) {
+				console.log(`called rename(${ argsToString(from, to) })`);
+				callback(enosys());
+			},
+			rmdir(path, callback) {
+				console.log(`called rmdir(${ argsToString(path) })`);
+				callback(enosys());
+			},
+			stat(path, callback) {
+				console.log(`called stat(${ argsToString(path) })`);
+				return this.lstat(path, callback);
+			},
+			symlink(path, link, callback) {
+				console.log(`called symlink(${ argsToString(path, link) })`);
+				callback(enosys());
+			},
+			truncate(path, length, callback) {
+				console.log(`called truncate(${ argsToString(path, length) })`);
+				callback(enosys());
+			},
+			async unlink(path, callback) {
+				console.log(`called unlink(${ argsToString(path) })`);
+		
+				var fixedPath = inspectPath(path).join("/");
+				await global.fs.rootHandle.delete(fixedPath);
+		
+				callback(null);
+			},
+			utimes(path, atime, mtime, callback) {
+				console.log(`called utimes(${ argsToString(path, atime, mtime) })`);
+				callback(enosys());
+			},
+			constants: {
+				O_RDONLY: 0,
+				O_WRONLY: 1,
+				O_RDWR: 2,
+				O_CREAT: 64,
+				O_EXCL: 128,
+				O_NOCTTY: 256,
+				O_TRUNC: 512,
+				O_APPEND: 1024,
+				O_DIRECTORY: 65536,
+				O_NOATIME: 262144,
+				O_NOFOLLOW: 131072,
+				O_SYNC: 1052672,
+				O_DIRECT: 16384,
+				O_NONBLOCK: 2048,
+			},
+		};	
 	}
 
 	if (!global.process) {
